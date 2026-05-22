@@ -66,7 +66,6 @@ void XboxController::onDisconnected() {
 }
 
 float XboxController::normalizeAxis(int value) {
-    // Bluepad32 gamepad axes are commonly around -512 to +511.
     // Clamp to protect against controller-specific overflow.
     float v = static_cast<float>(value) / 512.0f;
 
@@ -77,7 +76,7 @@ float XboxController::normalizeAxis(int value) {
 }
 
 float XboxController::normalizeTrigger(int value) {
-    // Bluepad32 brake/throttle are commonly 0 to 1023.
+    // Bluepad32 brake/throttle (0 to 1023).
     float v = static_cast<float>(value) / 1023.0f;
 
     if (v > 1.0f) v = 1.0f;
@@ -133,7 +132,7 @@ void XboxController::onGamepadData(
     mutex_exit(&g_state_mutex);
 }
 
-}  // namespace xbox
+} 
 
 extern "C" {
 

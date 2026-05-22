@@ -1,15 +1,41 @@
 #include "robot_command.hpp"
 
+#include <math.h>
+#include "pico/stdlib.h"
+
 namespace robo {
 
+bool RobotCommandMapper::prev_lb = false;
 bool RobotCommandMapper::prev_rb = false;
 bool RobotCommandMapper::prev_dpad_up = false;
 bool RobotCommandMapper::prev_dpad_down = false;
+bool RobotCommandMapper::prev_dpad_left = false;
+bool RobotCommandMapper::prev_dpad_right = false;
+bool RobotCommandMapper::prev_start = false;
+bool RobotCommandMapper::prev_a = false;
+
+bool RobotCommandMapper::back_was_held = false;
+bool RobotCommandMapper::back_hold_fired = false;
+uint32_t RobotCommandMapper::back_hold_start_ms = 0;
+
+float RobotCommandMapper::trigger_deadzone = 0.03f;
+float RobotCommandMapper::left_stick_deadzone = 0.12f;
+float RobotCommandMapper::precision_scale = 0.28f;
+uint32_t RobotCommandMapper::rehome_hold_ms = 2000;
 
 void RobotCommandMapper::init() {
+    prev_lb = false;
     prev_rb = false;
     prev_dpad_up = false;
     prev_dpad_down = false;
+    prev_dpad_left = false;
+    prev_dpad_right = false;
+    prev_start = false;
+    prev_a = false;
+
+    back_was_held = false;
+    back_hold_fired = false;
+    back_hold_start_ms = 0;
 }
 
 bool RobotCommandMapper::risingEdge(bool current, bool& previous) {
@@ -18,51 +44,142 @@ bool RobotCommandMapper::risingEdge(bool current, bool& previous) {
     return result;
 }
 
+float RobotCommandMapper::applyDeadzone(float value, float deadzone) {
+    if (fabsf(value) < deadzone) {
+        return 0.0f;
+    }
+
+    return value;
+}
+
+void RobotCommandMapper::setTriggerDeadzone(float dz) {
+    if (dz < 0.0f) dz = 0.0f;
+    if (dz > 0.5f) dz = 0.5f;
+    trigger_deadzone = dz;
+}
+
+float RobotCommandMapper::getTriggerDeadzone() {
+    return trigger_deadzone;
+}
+
+void RobotCommandMapper::setLeftStickDeadzone(float dz) {
+    if (dz < 0.0f) dz = 0.0f;
+    if (dz > 0.5f) dz = 0.5f;
+    left_stick_deadzone = dz;
+}
+
+float RobotCommandMapper::getLeftStickDeadzone() {
+    return left_stick_deadzone;
+}
+
+void RobotCommandMapper::setPrecisionScale(float scale) {
+    if (scale < 0.05f) scale = 0.05f;
+    if (scale > 1.0f) scale = 1.0f;
+    precision_scale = scale;
+}
+
+float RobotCommandMapper::getPrecisionScale() {
+    return precision_scale;
+}
+
+void RobotCommandMapper::setRehomeHoldMs(uint32_t hold_ms) {
+    if (hold_ms < 500u) hold_ms = 500u;
+    if (hold_ms > 10000u) hold_ms = 10000u;
+    rehome_hold_ms = hold_ms;
+}
+
+uint32_t RobotCommandMapper::getRehomeHoldMs() {
+    return rehome_hold_ms;
+}
+
 RobotCommand RobotCommandMapper::update(const xbox::State& state, bool failsafe_active) {
     RobotCommand cmd;
 
     cmd.controller_connected = state.connected;
     cmd.failsafe_active = failsafe_active;
 
-    if (failsafe_active) {
+    if (failsafe_active || !state.connected) {
         cmd.lateral = 0.0f;
-        cmd.fire_solenoid = false;
-        cmd.increase_max_speed = false;
-        cmd.decrease_max_speed = false;
         cmd.emergency_stop = true;
+
+        // Reset edge/hold state while disconnected so reconnecting starts cleanly.
+        init();
         return cmd;
     }
 
-    float right = state.rt;
-    float left = state.lt;
+    // Triggers are primary fast movement: RT - LT.
+    float rt = state.rt;
+    float lt = state.lt;
 
-    // Trigger deadzone to avoid tiny accidental movement.
-    if (right < 0.03f) right = 0.0f;
-    if (left < 0.03f) left = 0.0f;
+    if (rt < trigger_deadzone) rt = 0.0f;
+    if (lt < trigger_deadzone) lt = 0.0f;
 
-    // Differential trigger movement:
-    // RT moves right, LT moves left.
-    // Example: RT=0.50 and LT=0.25 gives +0.25 right movement.
-    cmd.lateral = right - left;
+    float trigger_lateral = rt - lt;
+
+    // Left joystick X is precision movement only when triggers are idle.
+    float stick_lateral = applyDeadzone(state.lx, left_stick_deadzone);
+
+    if (fabsf(trigger_lateral) > trigger_deadzone) {
+        cmd.lateral = trigger_lateral;
+        cmd.precision_active = false;
+    } else if (stick_lateral != 0.0f) {
+        cmd.lateral = stick_lateral * precision_scale;
+        cmd.precision_active = true;
+    } else {
+        cmd.lateral = 0.0f;
+        cmd.precision_active = false;
+    }
 
     if (cmd.lateral > 1.0f) cmd.lateral = 1.0f;
     if (cmd.lateral < -1.0f) cmd.lateral = -1.0f;
 
+    bool lb_now = (state.buttons & xbox::BTN_LB) != 0;
     bool rb_now = (state.buttons & xbox::BTN_RB) != 0;
     bool dpad_up_now = (state.buttons & xbox::BTN_DPAD_UP) != 0;
     bool dpad_down_now = (state.buttons & xbox::BTN_DPAD_DOWN) != 0;
+    bool dpad_left_now = (state.buttons & xbox::BTN_DPAD_LEFT) != 0;
+    bool dpad_right_now = (state.buttons & xbox::BTN_DPAD_RIGHT) != 0;
+    bool start_now = (state.buttons & xbox::BTN_START) != 0;
+    bool back_now = (state.buttons & xbox::BTN_BACK) != 0;
+    bool a_now = (state.buttons & xbox::BTN_A) != 0;
     bool b_now = (state.buttons & xbox::BTN_B) != 0;
 
-    cmd.fire_solenoid = risingEdge(rb_now, prev_rb);
+    // LB is the chosen kick button. RB is also accepted as a backup for older mappings.
+    bool lb_fire = risingEdge(lb_now, prev_lb);
+    bool rb_fire = risingEdge(rb_now, prev_rb);
+    cmd.fire_solenoid = lb_fire || rb_fire;
+
     cmd.increase_max_speed = risingEdge(dpad_up_now, prev_dpad_up);
     cmd.decrease_max_speed = risingEdge(dpad_down_now, prev_dpad_down);
+    cmd.jog_left = risingEdge(dpad_left_now, prev_dpad_left);
+    cmd.jog_right = risingEdge(dpad_right_now, prev_dpad_right);
+    cmd.return_center = risingEdge(start_now, prev_start);
+    cmd.arm_request = risingEdge(a_now, prev_a);
+
+    // B is immediate stop/disarm while held.
     cmd.emergency_stop = b_now;
 
-    if (cmd.emergency_stop) {
-        cmd.lateral = 0.0f;
+    // View / Back requires a hold to request re-home.
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    if (back_now) {
+        if (!back_was_held) {
+            back_was_held = true;
+            back_hold_fired = false;
+            back_hold_start_ms = now;
+        }
+
+        if (!back_hold_fired && (uint32_t)(now - back_hold_start_ms) >= rehome_hold_ms) {
+            cmd.rehome_request = true;
+            back_hold_fired = true;
+        }
+    } else {
+        back_was_held = false;
+        back_hold_fired = false;
+        back_hold_start_ms = 0;
     }
 
     return cmd;
 }
 
-}  // namespace robo
+}  

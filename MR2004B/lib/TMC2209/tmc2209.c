@@ -11,7 +11,7 @@
 static volatile uint32_t isr_step_interval_us = 0;
 static volatile bool     isr_alarm_active     = false;
 static volatile bool     endstop_safety_enabled = false;
-static void reschedule_alarm(uint32_t interval_us); // forward declaration
+static void reschedule_alarm(uint32_t interval_us);
 
 #define TMC_UART_TIMEOUT_US  5000u
 #define TMC_BAD_READ         0xDEADBEEFu
@@ -52,7 +52,7 @@ static volatile MotionState mot = {
     .manual_velocity_mode = false,
     .acceleration = SAVE_ACCEL,
     .deceleration = SAVE_DECEL,
-    .jerk = 0.0f,        // S-curve off by default;
+    .jerk = 0.0f, // S-curve off by default;
     .current_accel = 0.0f,
     .position = 0,
     .target_position = 0,
@@ -74,6 +74,53 @@ static volatile MotionState mot = {
     .stallguard_threshold = 50,
     .stall_detected = false,
 };
+
+static inline float clamp_float(float value, float low, float high) {
+    if (value < low) return low;
+    if (value > high) return high;
+    return value;
+}
+
+static inline float approach_float(float current, float target, float max_delta) {
+    if (max_delta < 0.0f) max_delta = -max_delta;
+
+    if (target > current + max_delta) {
+        return current + max_delta;
+    }
+
+    if (target < current - max_delta) {
+        return current - max_delta;
+    }
+
+    return target;
+}
+
+static inline float apply_jerk_limit(float desired_accel, float dt_s) {
+    if (mot.jerk <= 0.0f) {
+        mot.current_accel = desired_accel;
+        return mot.current_accel;
+    }
+
+    const float max_accel_delta = mot.jerk * dt_s;
+    mot.current_accel = approach_float(mot.current_accel, desired_accel, max_accel_delta);
+    return mot.current_accel;
+}
+
+static inline void stop_motion_state(bool clear_manual_mode) {
+    if (clear_manual_mode) {
+        mot.manual_velocity_mode = false;
+        mot.manual_velocity_command = 0.0f;
+    }
+
+    mot.target_position = mot.position;
+    mot.current_speed = 0.0f;
+    mot.target_speed = 0.0f;
+    mot.current_accel = 0.0f;
+    mot.moving = false;
+    isr_step_interval_us = 0;
+    isr_alarm_active = false;
+}
+
 
 // CRC
 uint8_t tmc_crc(uint8_t *data, uint8_t length) {
@@ -117,7 +164,7 @@ void tmc_write(uint8_t reg, uint32_t value) {
     gpio_pull_up(UART_TX_PIN);
     busy_wait_us_32(20);
 
-    // Read and discard echo — bail as soon as we have 8 bytes
+    // Read and discard echo, bail as soon as we have 8 bytes
     uint8_t dummy[8];
     (void)uart_read_exact_timeout(dummy, 8, TMC_UART_TIMEOUT_US);
 
@@ -140,8 +187,7 @@ uint32_t tmc_read(uint8_t reg) {
     gpio_pull_up(UART_TX_PIN);
     busy_wait_us_32(20);
 
-    // Read echo + reply. Some modules produce 12 bytes (4 echo + 8 reply),
-    // and yours showed 13 bytes because of one trailing 0x00, so allow margin.
+    // Read echo + reply (12 bytes)
     uint8_t rx[16];
     size_t n = 0;
     uint64_t start = time_us_64();
@@ -158,9 +204,7 @@ uint32_t tmc_read(uint8_t reg) {
 
     if (n < 8) return TMC_BAD_READ;
 
-    // Search specifically for a TMC read reply frame:
-    //   0x05 0xFF reg data3 data2 data1 data0 crc
-    // This ignores the local echo and any trailing padding byte.
+    // Search specifically for a TMC read reply frame
     for (size_t off = 0; off + 7 < n; off++) {
         if (rx[off] != 0x05) continue;
         if (rx[off + 1] != 0xFF) continue;
@@ -235,7 +279,7 @@ void tmc_init(void) {
 
     gpio_init(EN_PIN);
     gpio_set_dir(EN_PIN, GPIO_OUT);
-    gpio_put(EN_PIN, 1); // disabled at boot; TMC2209 EN is active LOW
+    gpio_put(EN_PIN, 1); // disabled at boot, TMC2209 EN is active LOW
 
     gpio_init(RGB_R_PIN);
     gpio_set_dir(RGB_R_PIN, GPIO_OUT);
@@ -291,8 +335,7 @@ void tmc_configure(uint8_t ihold, uint8_t irun, uint8_t iholddelay,
                    uint8_t microsteps, bool stealthchop) {
     printf("\nConfiguring TMC2209...\n");
 
-    // 1) Put driver into UART-controlled mode first.
-    // pdn_disable = 1, mstep_reg_select = 1
+    // Put driver into UART-controlled mode first.
     uint32_t gconf = (1u << 6) | (1u << 7);
 
     // en_SpreadCycle = 1 means SpreadCycle.
@@ -302,8 +345,7 @@ void tmc_configure(uint8_t ihold, uint8_t irun, uint8_t iholddelay,
     }
     tmc_write_counted(TMC_REG_GCONF, gconf, "GCONF");
 
-    // 2) Current control. IHOLD_IRUN is not always useful to read back;
-    // verify this write with IFCNT instead of relying on register readback.
+    // Current control. IHOLD_IRUN is usually write-only, so we verify with IFCNT.
     uint32_t ihold_irun =
         ((uint32_t)ihold) |
         ((uint32_t)irun << 8) |
@@ -317,24 +359,24 @@ void tmc_configure(uint8_t ihold, uint8_t irun, uint8_t iholddelay,
     // INTPOL bit 28 = interpolate to 256 microsteps
     uint32_t mres = tmc_microstep_bits(microsteps);
     uint32_t chopconf =
-        (1u << 28) |      // INTPOL = 1
+        (1u << 28) | // INTPOL = 1
         (mres << 24) |
-        (2u << 15)  |      // TBL
-        (3u << 0)   |      // TOFF
-        (5u << 4)   |      // HSTRT
-        (3u << 7);         // HEND
+        (2u << 15)  | // TBL
+        (3u << 0)   | // TOFF
+        (5u << 4)   | // HSTRT
+        (3u << 7); // HEND
     tmc_write_counted(TMC_REG_CHOPCONF, chopconf, "CHOPCONF");
 
-    // 4) StealthChop threshold. TPWMTHRS is commonly write-only; verify with IFCNT.
+    // StealthChop threshold. TPWMTHRS is commonly write-only; verify with IFCNT.
     tmc_write_counted(TMC_REG_TPWMTHRS, 500u, "TPWMTHRS");
 
-    // 5) PWM config. PWMCONF is readable.
+    // PWM config. PWMCONF is readable.
     tmc_write_counted(TMC_REG_PWMCONF, 0xC10D0024u, "PWMCONF");
 
-    // 6) StallGuard threshold, only useful later in SpreadCycle tuning.
+    // StallGuard threshold, only useful later in SpreadCycle tuning.
     tmc_write_counted(TMC_REG_SGTHRS, mot.stallguard_threshold, "SGTHRS");
 
-    // 7) Powerdown delay. Also usually write-only; verify with IFCNT.
+    // Powerdown delay. Also usually write-only; verify with IFCNT.
     tmc_write_counted(TMC_REG_TPOWERDOWN, 20u, "TPOWERDOWN");
 
     sleep_ms(20);
@@ -460,15 +502,28 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
 
     const float stop_deadband = 1.0f;
 
-    if (fabsf(velocity_steps_per_sec) <= stop_deadband) {
-        motion_manual_stop();
-        return;
+    if (velocity_steps_per_sec > MANUAL_MAX_SPEED) {
+        velocity_steps_per_sec = MANUAL_MAX_SPEED;
+    } else if (velocity_steps_per_sec < -MANUAL_MAX_SPEED) {
+        velocity_steps_per_sec = -MANUAL_MAX_SPEED;
     }
 
-    if (velocity_steps_per_sec > mot.max_speed) {
-        velocity_steps_per_sec = mot.max_speed;
-    } else if (velocity_steps_per_sec < -mot.max_speed) {
-        velocity_steps_per_sec = -mot.max_speed;
+    // Command released: use S-curve deceleration down to zero, but keep EN active
+    // so the motor continues holding torque.
+    if (fabsf(velocity_steps_per_sec) <= stop_deadband) {
+        uint32_t irq = save_and_disable_interrupts();
+        mot.manual_velocity_mode = true;
+        mot.manual_velocity_command = 0.0f;
+        mot.target_speed = 0.0f;
+        mot.max_speed = MANUAL_MAX_SPEED;
+        mot.acceleration = MANUAL_ACCEL;
+        mot.deceleration = MANUAL_DECEL;
+        mot.jerk = MANUAL_JERK;
+        if (mot.current_speed > 1.0f) {
+            mot.moving = true;
+        }
+        restore_interrupts(irq);
+        return;
     }
 
     bool new_direction = (velocity_steps_per_sec > 0.0f);
@@ -477,15 +532,14 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
     if (mot.rail_calibrated) {
         new_target = new_direction ? mot.rail_max : mot.rail_min;
 
-        // Do not push harder into a calibrated rail limit.
+        // Do not push harder into a calibrated rail limit. This stops stepping
+        // but does not disable the driver.
         if ((new_direction && mot.position >= mot.rail_max) ||
             (!new_direction && mot.position <= mot.rail_min)) {
             motion_stop_immediate();
             return;
         }
     } else {
-        // Before homing/calibration, allow a long relative target.
-        // This should only be used for careful bench testing.
         new_target = mot.position + (new_direction ? 1000000 : -1000000);
     }
 
@@ -497,6 +551,10 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
     mot.manual_velocity_mode = true;
     mot.manual_velocity_command = velocity_steps_per_sec;
     mot.target_speed = fabsf(velocity_steps_per_sec);
+    mot.max_speed = MANUAL_MAX_SPEED;
+    mot.acceleration = MANUAL_ACCEL;
+    mot.deceleration = MANUAL_DECEL;
+    mot.jerk = MANUAL_JERK;
     mot.target_position = new_target;
     mot.pid_enabled = false;
     mot.pid_integral = 0.0f;
@@ -505,27 +563,30 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
 
     if (needs_start) {
         mot.direction = new_direction;
-        mot.current_speed = 0.0f;
-        mot.current_accel = 0.0f;
+        // Preserve current speed only when continuing the same manual move.
+        if (direction_changed) {
+            mot.current_accel = 0.0f;
+        }
         mot.moving = true;
     }
 
     restore_interrupts(irq);
 
-    if (needs_start) {
-        gpio_put(DIR_PIN, mot.direction ? 1 : 0);
-        busy_wait_us_32(10);
+    gpio_put(DIR_PIN, mot.direction ? 1 : 0);
+    busy_wait_us_32(10);
 
+    if (needs_start || !isr_alarm_active) {
         uint32_t start_interval = (uint32_t)(1000000.0f / 500.0f);
         isr_step_interval_us = start_interval;
         reschedule_alarm(start_interval);
     }
 }
 
+
 void motion_manual_stop(void) {
-    mot.manual_velocity_mode = false;
-    mot.manual_velocity_command = 0.0f;
-    motion_stop();
+    // Teleop release should stop step generation immediately, but it should NOT
+    // disable the driver. EN remains low, so the NEMA should keep holding torque.
+    motion_stop_immediate();
 }
 
 bool motion_is_manual_velocity_mode(void) {
@@ -540,19 +601,16 @@ void motion_stop(void) {
 }
 
 void motion_stop_immediate(void) {
-    mot.manual_velocity_mode = false;
-    mot.manual_velocity_command = 0.0f;
-    mot.target_position  = mot.position;
-    mot.current_speed    = 0.0f;
-    mot.target_speed     = 0.0f;
-    mot.current_accel    = 0.0f;
-    mot.moving           = false;
-    isr_step_interval_us = 0;  // ISR will see this and not reschedule
-    isr_alarm_active     = false;
+    stop_motion_state(true);
 }
+
 
 void motion_set_jerk(float jerk) {
     mot.jerk = (jerk > 0.0f) ? jerk : 0.0f;
+}
+
+float motion_get_jerk(void) {
+    return mot.jerk;
 }
 
 void motion_move_to_mm(float mm) {
@@ -561,8 +619,10 @@ void motion_move_to_mm(float mm) {
 
 // Goalkeeper helpers
 void motion_save(float target_mm) {
+    motion_set_max_speed(SAVE_SPEED);
     motion_set_speed(SAVE_SPEED);
     motion_set_acceleration(SAVE_ACCEL, SAVE_DECEL);
+    motion_set_jerk(SAVE_JERK);
 
     // Convert mm to steps relative to calibrated rail_min.
     // This function is useful for future ball-position targeting.
@@ -573,20 +633,26 @@ void motion_save(float target_mm) {
 }
 
 void motion_save_left(void) {
+    motion_set_max_speed(SAVE_SPEED);
     motion_set_speed(SAVE_SPEED);
     motion_set_acceleration(SAVE_ACCEL, SAVE_DECEL);
+    motion_set_jerk(SAVE_JERK);
     motion_move_to(mot.rail_min);
 }
 
 void motion_save_right(void) {
+    motion_set_max_speed(SAVE_SPEED);
     motion_set_speed(SAVE_SPEED);
     motion_set_acceleration(SAVE_ACCEL, SAVE_DECEL);
+    motion_set_jerk(SAVE_JERK);
     motion_move_to(mot.rail_max);
 }
 
 void motion_return_center(void) {
+    motion_set_max_speed(RETURN_SPEED);
     motion_set_speed(RETURN_SPEED);
-    motion_set_acceleration(RETURN_ACCEL, RETURN_ACCEL);
+    motion_set_acceleration(RETURN_ACCEL, RETURN_DECEL);
+    motion_set_jerk(RETURN_JERK);
     int32_t center = mot.rail_min + (mot.rail_max - mot.rail_min) / 2;
     motion_move_to(center);
 }
@@ -643,98 +709,138 @@ static float braking_distance(float speed, float decel) {
 
 // Main Update — call in tight loop or timer ISR
 void motion_update(void) {
+    static uint64_t last_update_time = 0;
+
     if (!mot.enabled || !mot.moving) {
         mot.current_speed = 0.0f;
+        mot.current_accel = 0.0f;
+        last_update_time = time_us_64();
         return;
     }
 
     uint64_t now = time_us_64();
+    float dt_ramp = (last_update_time > 0) ? (float)(now - last_update_time) * 1e-6f : 0.001f;
+    if (dt_ramp <= 0.0f || dt_ramp > 0.05f) {
+        dt_ramp = 0.001f;
+    }
+    last_update_time = now;
 
-    // Determine remaining steps
     int32_t remaining = mot.target_position - mot.position;
+
     if (remaining == 0) {
-        mot.manual_velocity_mode = false;
-        mot.manual_velocity_command = 0.0f;
-        mot.moving        = false;
-        mot.current_speed = 0.0f;
-        isr_step_interval_us = 0;
-        isr_alarm_active = false;
+        stop_motion_state(true);
         return;
     }
 
-    float abs_remaining = fabsf((float)remaining);
+    // Manual velocity mode
+    if (mot.manual_velocity_mode) {
+        float target_signed_speed = mot.manual_velocity_command;
 
-    // PID mode: override target_speed with PID output
-    if (mot.pid_enabled) {
-        static uint64_t last_pid_time = 0;
-        float dt = (last_pid_time > 0) ? (float)(now - last_pid_time) * 1e-6f : 0.001f;
-        last_pid_time = now;
-        float pid_out = motion_pid_compute(mot.target_position, mot.position, dt);
-        mot.target_speed = fabsf(pid_out);
-        if (mot.target_speed > mot.max_speed) mot.target_speed = mot.max_speed;
-    }
-
-    // S-curve / trapezoidal ramp
-    // When jerk == 0: pure trapezoidal (instant accel change).
-    // When jerk  > 0: S-curve (accel itself ramps, smoothing the speed profile).
-    float bd = braking_distance(mot.current_speed, mot.deceleration);
-    float desired_speed;
-
-    if (abs_remaining <= bd + 1.0f) {
-        // Deceleration phase
-        desired_speed = sqrtf(2.0f * mot.deceleration * abs_remaining);
-        if (desired_speed < 50.0f) desired_speed = 50.0f; // minimum crawl speed
-    } else {
-        desired_speed = mot.target_speed > 0 ? mot.target_speed : mot.max_speed;
-    }
-
-    static uint64_t last_update_time = 0;
-    float dt_ramp = (last_update_time > 0) ? (float)(now - last_update_time) * 1e-6f : 0.001f;
-    if (dt_ramp > 0.05f) dt_ramp = 0.001f; // clamp on first call / resume
-    last_update_time = now;
-
-    float speed_error = desired_speed - mot.current_speed;
-
-    if (mot.jerk > 0.0f) {
-        // S-curve: ramp the acceleration value itself using jerk limit
-        float target_accel = (speed_error > 0) ? mot.acceleration : -mot.deceleration;
-        float accel_error  = target_accel - mot.current_accel;
-        float accel_step   = mot.jerk * dt_ramp;
-        if (accel_error > 0) {
-            mot.current_accel += accel_step;
-            if (mot.current_accel > mot.acceleration) mot.current_accel = mot.acceleration;
-        } else {
-            mot.current_accel -= accel_step;
-            if (mot.current_accel < -mot.deceleration) mot.current_accel = -mot.deceleration;
+        if (mot.rail_calibrated) {
+            if ((mot.position >= mot.rail_max && target_signed_speed > 0.0f) ||
+                (mot.position <= mot.rail_min && target_signed_speed < 0.0f)) {
+                target_signed_speed = 0.0f;
+            }
         }
-        // If we're close to target speed, don't overshoot
-        if (fabsf(speed_error) < fabsf(mot.current_accel * dt_ramp)) {
+
+        target_signed_speed = clamp_float(target_signed_speed, -mot.max_speed, mot.max_speed);
+
+        float current_signed_speed = mot.direction ? mot.current_speed : -mot.current_speed;
+        float speed_error = target_signed_speed - current_signed_speed;
+
+        float desired_accel = 0.0f;
+        if (fabsf(speed_error) > 0.5f) {
+            float same_sign = current_signed_speed * target_signed_speed;
+            bool speeding_up_same_direction =
+                (same_sign >= 0.0f) && (fabsf(target_signed_speed) > fabsf(current_signed_speed));
+
+            float accel_limit = speeding_up_same_direction ? mot.acceleration : mot.deceleration;
+            desired_accel = clamp_float(speed_error / dt_ramp, -accel_limit, accel_limit);
+        }
+
+        float accel_now = apply_jerk_limit(desired_accel, dt_ramp);
+
+        if (fabsf(speed_error) <= fabsf(accel_now * dt_ramp)) {
+            current_signed_speed = target_signed_speed;
+            mot.current_accel = 0.0f;
+        } else {
+            current_signed_speed += accel_now * dt_ramp;
+        }
+
+        if (fabsf(target_signed_speed) < 1.0f && fabsf(current_signed_speed) < 1.0f) {
+            stop_motion_state(true);
+            return;
+        }
+
+        mot.direction = (current_signed_speed >= 0.0f);
+        mot.current_speed = fabsf(current_signed_speed);
+
+        if (mot.current_speed > mot.max_speed) {
+            mot.current_speed = mot.max_speed;
+        }
+
+        gpio_put(DIR_PIN, mot.direction ? 1 : 0);
+
+        if (mot.current_speed < 1.0f) {
+            isr_step_interval_us = 0;
+        } else {
+            isr_step_interval_us = (uint32_t)(1000000.0f / mot.current_speed);
+            if (!isr_alarm_active) {
+                reschedule_alarm(isr_step_interval_us);
+            }
+        }
+    } else {
+        float abs_remaining = fabsf((float)remaining);
+
+        // PID mode: override target_speed with PID output
+        if (mot.pid_enabled) {
+            static uint64_t last_pid_time = 0;
+            float dt = (last_pid_time > 0) ? (float)(now - last_pid_time) * 1e-6f : 0.001f;
+            last_pid_time = now;
+            float pid_out = motion_pid_compute(mot.target_position, mot.position, dt);
+            mot.target_speed = fabsf(pid_out);
+            if (mot.target_speed > mot.max_speed) mot.target_speed = mot.max_speed;
+        }
+
+        float bd = braking_distance(mot.current_speed, mot.deceleration);
+        float desired_speed;
+
+        if (abs_remaining <= bd + 1.0f) {
+            desired_speed = sqrtf(2.0f * mot.deceleration * abs_remaining);
+            if (desired_speed < 50.0f) desired_speed = 50.0f;
+        } else {
+            desired_speed = mot.target_speed > 0.0f ? mot.target_speed : mot.max_speed;
+        }
+
+        desired_speed = clamp_float(desired_speed, 0.0f, mot.max_speed);
+
+        float speed_error = desired_speed - mot.current_speed;
+        float desired_accel = 0.0f;
+
+        if (fabsf(speed_error) > 0.5f) {
+            float accel_limit = (speed_error > 0.0f) ? mot.acceleration : mot.deceleration;
+            desired_accel = clamp_float(speed_error / dt_ramp, -accel_limit, accel_limit);
+        }
+
+        float accel_now = apply_jerk_limit(desired_accel, dt_ramp);
+
+        if (fabsf(speed_error) <= fabsf(accel_now * dt_ramp)) {
             mot.current_speed = desired_speed;
             mot.current_accel = 0.0f;
         } else {
-            mot.current_speed += mot.current_accel * dt_ramp;
+            mot.current_speed += accel_now * dt_ramp;
         }
-    } else {
-        // Trapezoidal: instant accel change
-        if (speed_error > 0) {
-            mot.current_speed += mot.acceleration * dt_ramp;
-            if (mot.current_speed > desired_speed) mot.current_speed = desired_speed;
+
+        mot.current_speed = clamp_float(mot.current_speed, 0.0f, mot.max_speed);
+
+        if (mot.current_speed < 1.0f) {
+            isr_step_interval_us = 0;
         } else {
-            mot.current_speed -= mot.deceleration * dt_ramp;
-            if (mot.current_speed < desired_speed) mot.current_speed = desired_speed;
+            isr_step_interval_us = (uint32_t)(1000000.0f / mot.current_speed);
+            if (!isr_alarm_active) {
+                reschedule_alarm(isr_step_interval_us);
+            }
         }
-    }
-
-    if (mot.current_speed < 0.0f)         mot.current_speed = 0.0f;
-    if (mot.current_speed > mot.max_speed) mot.current_speed = mot.max_speed;
-
-    // Update step interval for hardware timer ISR
-    // motion_update() only computes the ramp — the ISR does the actual stepping.
-    // This decouples step timing from main loop speed completely.
-    if (mot.current_speed < 1.0f) {
-        isr_step_interval_us = 0; // signal ISR to stop stepping
-    } else {
-        isr_step_interval_us = (uint32_t)(1000000.0f / mot.current_speed);
     }
 
     // Optional physical endstop safety. Keep this OFF during normal demo/save moves.
@@ -744,8 +850,7 @@ void motion_update(void) {
         isr_step_interval_us = 0;
     }
 
-    // StallGuard stall detection. Never let a missed UART response
-    // freeze the controller; tmc_get_stallguard() is timeout-safe now.
+    // StallGuard stall detection.
     static bool was_moving = false;
     static uint32_t stall_count = 0;
     static uint64_t move_start_us = 0;
@@ -773,9 +878,6 @@ void motion_update(void) {
         }
     }
 }
-
-// Hardware Timer ISR
-static void step_alarm_isr(uint alarm_num);
 
 static void reschedule_alarm(uint32_t interval_us) {
     if (interval_us < 10) interval_us = 10; // hard floor: 100 000 steps/sec max
@@ -850,13 +952,6 @@ void motion_set_stall_callback(void (*cb)(void)) {
     mot.stall_detected   = false;
 }
 
-// ─── Current Control ─────────────────────────────────────────────────────────
-// TMC2209 current formula:
-//   I_rms = (CS + 1) / 32 * (Vfs / Rsense) * (1 / sqrt(2))
-// With internal Rsense (~0.11Ω on most modules) and Vfs = 0.325V:
-//   I_rms ≈ register_value / 31 * 2.0A  (simplified for standard modules)
-//
-// We clamp to 2.0A RMS — the TMC2209 absolute maximum.
 
 static uint8_t amps_to_cs(float amps) {
     if (amps < 0.0f) amps = 0.0f;
@@ -881,10 +976,6 @@ void tmc_set_current(float irun_amps, float ihold_amps) {
            cs_to_amps(irun), irun, cs_to_amps(ihold), ihold);
 }
 
-// PWM_SCALE register: bits [7:0] = PWM_SCALE_SUM (load indicator)
-// In StealthChop: 0 = no load, 255 = maximum load (near stall)
-// This is NOT a direct current measurement, but correlates with motor load.
-// To get actual current: I_actual ≈ (PWM_SCALE_SUM / 255) * I_run_setting
 float tmc_get_current_scale(void) {
     uint32_t pwm_scale = tmc_read(TMC_REG_PWM_SCALE);
     if (pwm_scale == TMC_BAD_READ) return -1.0f;
@@ -939,9 +1030,9 @@ bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_st
         sleep_ms(50);
     }
 
-    // Phase 1: Move toward MIN endstop
+    // Move toward MIN endstop
     bool hit_min = false;
-    uint32_t timeout = 2000000; // generous timeout
+    uint32_t timeout = 2000000;
     gpio_put(DIR_PIN, HOME_DIR);
     mot.direction = (HOME_DIR == 1);
     sleep_us(10);
@@ -962,7 +1053,7 @@ bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_st
     mot.position = 0;
     sleep_ms(50);
 
-    // Phase 2: Back off from MIN
+    // Back off from MIN
     gpio_put(DIR_PIN, AWAY_DIR);
     mot.direction = (AWAY_DIR == 1);
     sleep_us(10);
@@ -982,7 +1073,7 @@ bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_st
     // rail_min is the usable minimum
     mot.rail_min = mot.position;
 
-    // Phase 3: Find MAX endstop
+    // Find MAX endstop
     bool hit_max = false;
     timeout = 2000000;
     gpio_put(DIR_PIN, AWAY_DIR);
@@ -1019,7 +1110,7 @@ bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_st
         return false;
     }
 
-    // Phase 4: Back off from MAX
+    // Back off from MAX
     gpio_put(DIR_PIN, HOME_DIR);
     mot.direction = (HOME_DIR == 1);
     sleep_us(10);
@@ -1039,7 +1130,7 @@ bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_st
     // rail_max is the usable maximum
     mot.rail_max = mot.position;
 
-    // rail_length_steps hint is ignored, we always use measured values
+    // rail_length_steps hint is ignored: always use measured values
     (void)rail_length_steps;
 
     mot.target_speed    = saved_speed;
@@ -1080,7 +1171,7 @@ int32_t mot_get_rail_min(void) { return mot.rail_min; }
 int32_t mot_get_rail_max(void) { return mot.rail_max; }
 
 void tmc_uart_scan_ioin(void) {
-    // Test: release TX and just listen — no packet sent
+    // Test: release TX and just listen
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_SIO);
     gpio_set_dir(UART_TX_PIN, GPIO_IN);
     gpio_pull_up(UART_TX_PIN);

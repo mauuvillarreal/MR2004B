@@ -56,7 +56,6 @@ public:
 
     static bool pressed(Button b);
 
-    // Called from Bluepad32 C callbacks.
     static void onConnected();
     static void onDisconnected();
     static void onGamepadData(
@@ -77,4 +76,4 @@ private:
     static float applyDeadzone(float value);
 };
 
-}  // namespace xbox
+}

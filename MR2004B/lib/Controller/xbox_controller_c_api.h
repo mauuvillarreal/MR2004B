@@ -6,8 +6,6 @@
 extern "C" {
 #endif
 
-// C bridge implemented in xbox_controller.cpp.
-// This header is intentionally pure C so xbox_bluepad32_platform.c can include it.
 void xbox_cpp_on_connected(void);
 void xbox_cpp_on_disconnected(void);
 void xbox_cpp_on_gamepad_data(

@@ -11,7 +11,7 @@ MPU6050::MPU6050(i2c_inst_t* i2c, uint8_t addr)
     : _i2c(i2c), _address(addr) {}
 
 
-// Initialize MPU6050: wake up, set default configs
+// Initialize MPU6050
 bool MPU6050::init() {
     writeReg(PWR_MGMT_1, 0x00); // Wake up
     sleep_ms(100);

@@ -26,10 +26,6 @@ static void platform_on_init_complete(void) {
     // Start Bluetooth scanning and autoconnect.
     uni_bt_start_scanning_and_autoconnect_unsafe();
 
-    // During debugging only, uncomment this to delete old pairings each boot.
-    // After your controller pairs reliably, keep it commented.
-    // uni_bt_del_keys_unsafe();
-
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
 }
 

@@ -33,66 +33,49 @@ extern "C" {
 #define MPU_SCL_PIN     3
 #define MPU_I2C_BAUD    400000
 
-// Direction that drives toward the MIN/home endstop.
-// If homing goes the wrong way, flip this: 0 → 1 or 1 → 0
 #define HOME_DIR        0    // 0 or 1
 #define AWAY_DIR        (1 - HOME_DIR)
 
 #define UART_ID         uart1
 #define BAUD_RATE       115200
-#define UART_TX_PIN     8    // Pico UART1 TX, connected to TMC2209 single-wire UART net
+#define UART_TX_PIN     8  
 #define UART_RX_PIN     9
 
-// ─── Physical Machine Constants ───────────────────────────────────────────────
 #define MOTOR_STEPS_PER_REV  200
 #define MICROSTEPS           16
 
-// Keep these for reference only.
-// Your real measured calibration overrides the theoretical calculation.
 #define PULLEY_TEETH         80
 #define BELT_PITCH_MM        2.0f
 #define MM_PER_REV           (PULLEY_TEETH * BELT_PITCH_MM)
 
-// ─── Measured machine calibration ───────────────────────────────────────────
-// From homing:
-// usable travel = 3085 - 61 = 3024 steps
-// physical travel = 344.35 mm
-// STEPS_PER_MM = 3024 / 344.35 = 8.78
 #define RAIL_LENGTH_MM       344.35f
 #define STEPS_PER_MM         8.78f
 
 #define RAIL_STEPS           ((int32_t)(RAIL_LENGTH_MM * STEPS_PER_MM))
 #define RAIL_CENTER_STEPS    (RAIL_STEPS / 2)
 
-// ─── Current Settings (NEMA 17 — TMC2209 max 2A RMS) ─────────────────────────
-// Formula: I_rms = (register_val / 31) * 2.828A
-// IRUN 28 = 2.56A peak / 1.81A RMS — fine for short duty-cycle saves with 24V
-// If motor gets uncomfortably hot after sustained use, drop to 24
 #define IHOLD       8    // Quieter/stronger hold for testing; reduce later if motor gets hot
 #define IRUN        20   // Conservative run current for UART-verified setup; raise later only if needed
 #define IHOLDDELAY  4    // ~0.5s before dropping to IHOLD after move ends
 
-// ─── Goalkeeper Motion Profiles ───────────────────────────────────────────────
-// At 20 steps/mm:
-//   20000 steps/sec = 1000 mm/sec  (safe baseline)
-//   28000 steps/sec = 1400 mm/sec  (good target)
-//   34000 steps/sec = 1700 mm/sec  (likely ceiling for NEMA 17 on 24V)
-//   48000+           = step loss territory on most NEMA 17s
-//
-// TUNING LADDER — raise SAVE_SPEED by 2000 at a time and test:
-//   Does it skip? → lower by 2000 and raise SAVE_ACCEL instead.
-//   Skipping on accel only? → lower SAVE_ACCEL, keep speed.
-//   Skipping at cruise? → lower SAVE_SPEED.
 
 
-#define SAVE_SPEED          8000.0f   // Faster baseline: ~911 mm/s at 8.78 steps/mm
-#define SAVE_ACCEL          40000.0f  // Increase/decrease after testing for skipped steps
-#define SAVE_DECEL          40000.0f
+#define SAVE_SPEED          12000.0f   // Aggressive save speed; tune upward only after testing
+#define SAVE_ACCEL          40000.0f   // Save acceleration in steps/sec^2
+#define SAVE_DECEL          45000.0f   // Save deceleration in steps/sec^2
+#define SAVE_JERK          180000.0f   // Save jerk in steps/sec^3; 0 disables S-curve
 
-#define RETURN_SPEED        5000.0f
+#define RETURN_SPEED         9000.0f
 #define RETURN_ACCEL        30000.0f
+#define RETURN_DECEL        35000.0f
+#define RETURN_JERK        140000.0f
 
-#define HOMING_SPEED        400.0f
+#define MANUAL_MAX_SPEED    12000.0f
+#define MANUAL_ACCEL        70000.0f
+#define MANUAL_DECEL        90000.0f
+#define MANUAL_JERK         0.0f
+
+#define HOMING_SPEED          400.0f
 
 // ─── TMC2209 Register Map ────────────────────────────────────────────────────
 #define TMC_REG_GCONF       0x00
@@ -112,6 +95,7 @@ extern "C" {
 #define TMC_REG_PWMCONF     0x70
 #define TMC_REG_PWM_SCALE   0x71
 #define TMC_REG_MSCNT       0x6A
+#define TMC_REG_DRV_STATUS  0x6F
 
 
 // ─── Motion Parameters ───────────────────────────────────────────────────────
@@ -187,6 +171,7 @@ void motion_set_max_speed(float steps_per_sec);
 float motion_get_max_speed(void);
 void motion_set_acceleration(float accel, float decel);
 void motion_set_jerk(float jerk);           // enable S-curve; 0 = trapezoidal
+float motion_get_jerk(void);
 void motion_move_to(int32_t target_steps);
 void motion_move_to_mm(float mm);           // convenience: move to mm position
 void motion_move_relative(int32_t delta_steps);

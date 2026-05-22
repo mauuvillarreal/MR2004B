@@ -43,7 +43,6 @@ void solenoid_update(void) {
 
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
-    // Signed subtraction handles wraparound safely.
     if ((int32_t)(now - solenoid_off_time_ms) >= 0) {
         solenoid_force_off();
     }
