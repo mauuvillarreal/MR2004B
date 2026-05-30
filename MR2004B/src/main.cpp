@@ -42,6 +42,14 @@ static constexpr bool DISARM_DISABLES_DRIVER        = false;
 static volatile bool stall_flag = false;
 
 static float g_controller_max_speed = CONTROLLER_START_MAX_SPEED;
+
+// Manual command caching: the motor profile should not be re-commanded every
+// 1 ms with tiny Xbox analog variations.  Demo mode is clean because it sends
+// one move command; manual should behave the same way whenever possible.
+static float g_manual_last_velocity_cmd = 0.0f;
+static bool  g_manual_velocity_cmd_valid = false;
+static bool  g_manual_stop_already_sent = false;
+static bool  g_manual_fast_mode_active = false;
 static int   g_manual_direction = 0;   // -1 = left, +1 = right, 0 = stopped
 static bool  g_manual_motion_active = false;
 static bool  g_fault_latched = false;
@@ -323,32 +331,94 @@ static int32_t clamp_position_to_rail(int32_t pos) {
 }
 
 static void stop_manual_motion(void) {
+    // Normal operator release should ramp down, not instantly kill step pulses.
+    // Send the zero-speed command only once. Re-sending it every 1 ms can delay
+    // the timer interrupt and create exactly the kind of manual-only rattle we
+    // are trying to remove.
+    if (!g_manual_stop_already_sent &&
+        (g_manual_motion_active || motion_is_manual_velocity_mode() || motion_is_moving())) {
+        motion_manual_velocity(0.0f);
+        g_manual_stop_already_sent = true;
+    }
+
+    g_manual_direction = 0;
+    g_manual_motion_active = false;
+    g_manual_velocity_cmd_valid = false;
+    g_manual_fast_mode_active = false;
+}
+
+static void emergency_stop_manual_motion(void) {
     if (g_manual_motion_active || motion_is_moving()) {
         motion_stop_immediate();
     }
 
     g_manual_direction = 0;
     g_manual_motion_active = false;
+    g_manual_velocity_cmd_valid = false;
+    g_manual_stop_already_sent = false;
+    g_manual_fast_mode_active = false;
 }
 
-static void apply_manual_lateral(float lateral) {
+static void apply_manual_lateral(float lateral, bool precision_active) {
     // lateral: -1.0 = full left, +1.0 = full right.
-    if (fabsf(lateral) < CONTROLLER_LATERAL_DEADZONE) {
+    //
+    // Important design change:
+    // - Fast trigger mode is event-like. Once RT/LT is past the deadzone, command
+    //   the selected velocity once and let the stepper profile run.
+    // - Precision stick mode is still analog, but tiny command changes are ignored
+    //   so Xbox ADC noise does not constantly retarget the motor.
+    const float abs_lat = fabsf(lateral);
+
+    if (abs_lat < CONTROLLER_LATERAL_DEADZONE) {
         stop_manual_motion();
         return;
     }
 
-    float requested_speed = fabsf(lateral) * g_controller_max_speed;
-    requested_speed = clampf_local(requested_speed, 300.0f, g_controller_max_speed);
+    float requested_speed;
+    if (precision_active) {
+        float mag = (abs_lat - CONTROLLER_LATERAL_DEADZONE) / (1.0f - CONTROLLER_LATERAL_DEADZONE);
+        mag = clampf_local(mag, 0.0f, 1.0f);
+        requested_speed = mag * g_controller_max_speed;
+        requested_speed = clampf_local(requested_speed, 250.0f, g_controller_max_speed);
+    } else {
+        requested_speed = g_controller_max_speed;
+    }
 
     float signed_velocity = (lateral > 0.0f) ? requested_speed : -requested_speed;
+    int new_dir = (signed_velocity > 0.0f) ? +1 : -1;
 
-    motion_set_acceleration(MANUAL_ACCEL, MANUAL_DECEL);
-    motion_set_max_speed(g_controller_max_speed);
-    motion_manual_velocity(signed_velocity);
+    // Trigger mode: do not re-command the same full-speed request every loop.
+    // This keeps responsiveness high but removes the repeated critical sections
+    // that were only present in manual mode.
+    bool should_send = false;
+    if (!g_manual_velocity_cmd_valid) {
+        should_send = true;
+    } else if (new_dir != g_manual_direction) {
+        should_send = true;
+    } else if (precision_active) {
+        // Fine stick mode needs updates, but only meaningful ones. 25 steps/s is
+        // small enough to feel responsive, but large enough to reject joystick noise.
+        if (fabsf(signed_velocity - g_manual_last_velocity_cmd) >= 25.0f) {
+            should_send = true;
+        }
+    } else if (!g_manual_fast_mode_active) {
+        should_send = true;
+    } else if (fabsf(signed_velocity - g_manual_last_velocity_cmd) >= 1.0f) {
+        should_send = true;
+    }
 
-    g_manual_direction = (signed_velocity > 0.0f) ? +1 : -1;
+    if (should_send) {
+        motion_set_acceleration(MANUAL_ACCEL, MANUAL_DECEL);
+        motion_set_max_speed(g_controller_max_speed);
+        motion_manual_velocity(signed_velocity);
+        g_manual_last_velocity_cmd = signed_velocity;
+        g_manual_velocity_cmd_valid = true;
+        g_manual_stop_already_sent = false;
+    }
+
+    g_manual_direction = new_dir;
     g_manual_motion_active = true;
+    g_manual_fast_mode_active = !precision_active;
 }
 
 static void apply_speed_step(bool increase) {
@@ -524,7 +594,7 @@ static void robot_control_core1(void) {
             previous_failsafe = failsafe;
             if (failsafe) {
                 printf("Controller failsafe active: stopping motion.\n");
-                stop_manual_motion();
+                emergency_stop_manual_motion();
                 solenoid_force_off();
                 g_auto_mode = AutoMode::NONE;
             } else {
@@ -535,6 +605,7 @@ static void robot_control_core1(void) {
         if (cmd.emergency_stop) {
             printf("Emergency stop / disarm.\n");
             g_auto_mode = AutoMode::NONE;
+            emergency_stop_manual_motion();
             set_robot_armed(false);
             update_runtime_led(pad.connected, failsafe, cmd);
             imu_print_reading(false);
@@ -624,7 +695,7 @@ static void robot_control_core1(void) {
 
         if (g_auto_mode == AutoMode::NONE) {
             // Your physical direction is inverted relative to the logical Xbox command.
-            apply_manual_lateral(-cmd.lateral);
+            apply_manual_lateral(-cmd.lateral, cmd.precision_active);
         }
 
         update_runtime_led(pad.connected, failsafe, cmd);

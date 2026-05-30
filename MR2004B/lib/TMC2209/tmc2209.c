@@ -508,6 +508,19 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
         velocity_steps_per_sec = -MANUAL_MAX_SPEED;
     }
 
+    // If the same manual command is already active, do nothing. The motion
+    // profile will continue running by itself. Avoiding repeated 1 kHz command
+    // writes is important because they briefly disable interrupts and can add
+    // manual-only step jitter.
+    {
+        uint32_t irq = save_and_disable_interrupts();
+        bool duplicate = mot.manual_velocity_mode &&
+                         fabsf(mot.manual_velocity_command - velocity_steps_per_sec) < 0.5f &&
+                         mot.moving;
+        restore_interrupts(irq);
+        if (duplicate) return;
+    }
+
     // Command released: use S-curve deceleration down to zero, but keep EN active
     // so the motor continues holding torque.
     if (fabsf(velocity_steps_per_sec) <= stop_deadband) {
@@ -545,8 +558,10 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
 
     uint32_t irq = save_and_disable_interrupts();
 
-    bool direction_changed = mot.moving && (mot.direction != new_direction);
-    bool needs_start = !mot.moving || !mot.manual_velocity_mode || direction_changed;
+    // Direction changes are handled by motion_update() by ramping signed speed
+    // through zero. Do NOT flip DIR here while current_speed is still nonzero.
+    bool direction_changed = mot.moving && (mot.direction != new_direction) && (mot.current_speed > 1.0f);
+    bool needs_start = !mot.moving || !mot.manual_velocity_mode;
 
     mot.manual_velocity_mode = true;
     mot.manual_velocity_command = velocity_steps_per_sec;
@@ -563,17 +578,19 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
 
     if (needs_start) {
         mot.direction = new_direction;
-        // Preserve current speed only when continuing the same manual move.
-        if (direction_changed) {
-            mot.current_accel = 0.0f;
-        }
         mot.moving = true;
+    } else if (!direction_changed && mot.current_speed <= 1.0f) {
+        mot.direction = new_direction;
     }
 
     restore_interrupts(irq);
 
-    gpio_put(DIR_PIN, mot.direction ? 1 : 0);
-    busy_wait_us_32(10);
+    // Only write DIR immediately when stopped/starting or continuing same direction.
+    // During reversals, motion_update() changes DIR only after speed crosses zero.
+    if (!direction_changed) {
+        gpio_put(DIR_PIN, mot.direction ? 1 : 0);
+        busy_wait_us_32(10);
+    }
 
     if (needs_start || !isr_alarm_active) {
         uint32_t start_interval = (uint32_t)(1000000.0f / 500.0f);

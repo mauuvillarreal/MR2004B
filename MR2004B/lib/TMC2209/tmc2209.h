@@ -49,7 +49,7 @@ extern "C" {
 #define MM_PER_REV           (PULLEY_TEETH * BELT_PITCH_MM)
 
 #define RAIL_LENGTH_MM       344.35f
-#define STEPS_PER_MM         8.78f
+#define STEPS_PER_MM         ((float)(MOTOR_STEPS_PER_REV * MICROSTEPS) / MM_PER_REV)
 
 #define RAIL_STEPS           ((int32_t)(RAIL_LENGTH_MM * STEPS_PER_MM))
 #define RAIL_CENTER_STEPS    (RAIL_STEPS / 2)
