@@ -6,7 +6,6 @@
 #include <string.h>
 #include <stdio.h>
 
-// Hardware timer for step generation
 #define STEP_ALARM_NUM  0
 static volatile uint32_t isr_step_interval_us = 0;
 static volatile bool     isr_alarm_active     = false;
@@ -43,7 +42,6 @@ static bool uart_read_exact_timeout(uint8_t *buf, size_t len, uint32_t timeout_u
     return true;
 }
 
-// Internal State
 static volatile MotionState mot = {
     .max_speed = SAVE_SPEED,
     .current_speed = 0.0f,
@@ -52,7 +50,7 @@ static volatile MotionState mot = {
     .manual_velocity_mode = false,
     .acceleration = SAVE_ACCEL,
     .deceleration = SAVE_DECEL,
-    .jerk = 0.0f, // S-curve off by default;
+    .jerk = 0.0f, 
     .current_accel = 0.0f,
     .position = 0,
     .target_position = 0,
@@ -222,7 +220,6 @@ uint32_t tmc_read(uint8_t reg) {
     return TMC_BAD_READ;
 }
 
-// Microstep resolution bits (MRES field in CHOPCONF)
 uint32_t tmc_microstep_bits(uint16_t microsteps) {
     // MRES: 0=256, 1=128, 2=64, 3=32, 4=16, 5=8, 6=4, 7=2, 8=1
     switch (microsteps) {
@@ -324,7 +321,7 @@ static bool tmc_write_counted(uint8_t reg, uint32_t value, const char *name) {
         return false;
     }
 
-    uint8_t delta = (uint8_t)(after - before); // wraps naturally at 255
+    uint8_t delta = (uint8_t)(after - before); // wraps at 255
     printf("%-12s write 0x%08lX | IFCNT %u -> %u | %s\n",
            name, value, before, after, delta ? "accepted" : "NO COUNT");
 
@@ -335,7 +332,7 @@ void tmc_configure(uint8_t ihold, uint8_t irun, uint8_t iholddelay,
                    uint8_t microsteps, bool stealthchop) {
     printf("\nConfiguring TMC2209...\n");
 
-    // Put driver into UART-controlled mode first.
+    // Put driver into UART-controlled mode
     uint32_t gconf = (1u << 6) | (1u << 7);
 
     // en_SpreadCycle = 1 means SpreadCycle.
@@ -345,7 +342,7 @@ void tmc_configure(uint8_t ihold, uint8_t irun, uint8_t iholddelay,
     }
     tmc_write_counted(TMC_REG_GCONF, gconf, "GCONF");
 
-    // Current control. IHOLD_IRUN is usually write-only, so we verify with IFCNT.
+    // Current control.
     uint32_t ihold_irun =
         ((uint32_t)ihold) |
         ((uint32_t)irun << 8) |
@@ -353,30 +350,27 @@ void tmc_configure(uint8_t ihold, uint8_t irun, uint8_t iholddelay,
     printf("Expected IHOLD_IRUN fields: IHOLD=%u IRUN=%u IHOLDDELAY=%u\n",
            ihold, irun, iholddelay);
     tmc_write_counted(TMC_REG_IHOLD_IRUN, ihold_irun, "IHOLD_IRUN");
-
-    // 3) Chopper config. CHOPCONF is readable, so we also print readback later.
-    // MRES bits [27:24]
-    // INTPOL bit 28 = interpolate to 256 microsteps
+    
     uint32_t mres = tmc_microstep_bits(microsteps);
     uint32_t chopconf =
-        (1u << 28) | // INTPOL = 1
+        (1u << 28)   | // INTPOL = 1
         (mres << 24) |
-        (2u << 15)  | // TBL
-        (3u << 0)   | // TOFF
-        (5u << 4)   | // HSTRT
+        (2u << 15)   | // TBL
+        (3u << 0)    | // TOFF
+        (5u << 4)    | // HSTRT
         (3u << 7); // HEND
     tmc_write_counted(TMC_REG_CHOPCONF, chopconf, "CHOPCONF");
 
-    // StealthChop threshold. TPWMTHRS is commonly write-only; verify with IFCNT.
+    // StealthChop threshold.
     tmc_write_counted(TMC_REG_TPWMTHRS, 500u, "TPWMTHRS");
 
     // PWM config. PWMCONF is readable.
     tmc_write_counted(TMC_REG_PWMCONF, 0xC10D0024u, "PWMCONF");
 
-    // StallGuard threshold, only useful later in SpreadCycle tuning.
+    // StallGuard threshold.
     tmc_write_counted(TMC_REG_SGTHRS, mot.stallguard_threshold, "SGTHRS");
 
-    // Powerdown delay. Also usually write-only; verify with IFCNT.
+    // Powerdown delay.
     tmc_write_counted(TMC_REG_TPOWERDOWN, 20u, "TPOWERDOWN");
 
     sleep_ms(20);
@@ -508,21 +502,12 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
         velocity_steps_per_sec = -MANUAL_MAX_SPEED;
     }
 
-    // If the same manual command is already active, do nothing. The motion
-    // profile will continue running by itself. Avoiding repeated 1 kHz command
-    // writes is important because they briefly disable interrupts and can add
-    // manual-only step jitter.
-    {
-        uint32_t irq = save_and_disable_interrupts();
-        bool duplicate = mot.manual_velocity_mode &&
-                         fabsf(mot.manual_velocity_command - velocity_steps_per_sec) < 0.5f &&
-                         mot.moving;
-        restore_interrupts(irq);
-        if (duplicate) return;
+    if (mot.manual_velocity_mode && fabsf(velocity_steps_per_sec - mot.manual_velocity_command) < 0.5f) {
+        if (fabsf(velocity_steps_per_sec) > stop_deadband || mot.target_speed == 0.0f) {
+            return;
+        }
     }
 
-    // Command released: use S-curve deceleration down to zero, but keep EN active
-    // so the motor continues holding torque.
     if (fabsf(velocity_steps_per_sec) <= stop_deadband) {
         uint32_t irq = save_and_disable_interrupts();
         mot.manual_velocity_mode = true;
@@ -545,8 +530,7 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
     if (mot.rail_calibrated) {
         new_target = new_direction ? mot.rail_max : mot.rail_min;
 
-        // Do not push harder into a calibrated rail limit. This stops stepping
-        // but does not disable the driver.
+        // Do not push harder into a calibrated rail limit.
         if ((new_direction && mot.position >= mot.rail_max) ||
             (!new_direction && mot.position <= mot.rail_min)) {
             motion_stop_immediate();
@@ -558,9 +542,7 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
 
     uint32_t irq = save_and_disable_interrupts();
 
-    // Direction changes are handled by motion_update() by ramping signed speed
-    // through zero. Do NOT flip DIR here while current_speed is still nonzero.
-    bool direction_changed = mot.moving && (mot.direction != new_direction) && (mot.current_speed > 1.0f);
+    bool direction_changed = mot.moving && (mot.direction != new_direction);
     bool needs_start = !mot.moving || !mot.manual_velocity_mode;
 
     mot.manual_velocity_mode = true;
@@ -579,18 +561,14 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
     if (needs_start) {
         mot.direction = new_direction;
         mot.moving = true;
-    } else if (!direction_changed && mot.current_speed <= 1.0f) {
-        mot.direction = new_direction;
+    } else if (direction_changed) {
+        mot.current_accel = 0.0f;
     }
 
     restore_interrupts(irq);
 
-    // Only write DIR immediately when stopped/starting or continuing same direction.
-    // During reversals, motion_update() changes DIR only after speed crosses zero.
-    if (!direction_changed) {
-        gpio_put(DIR_PIN, mot.direction ? 1 : 0);
-        busy_wait_us_32(10);
-    }
+    gpio_put(DIR_PIN, mot.direction ? 1 : 0);
+    busy_wait_us_32(10);
 
     if (needs_start || !isr_alarm_active) {
         uint32_t start_interval = (uint32_t)(1000000.0f / 500.0f);
@@ -601,8 +579,6 @@ void motion_manual_velocity(float velocity_steps_per_sec) {
 
 
 void motion_manual_stop(void) {
-    // Teleop release should stop step generation immediately, but it should NOT
-    // disable the driver. EN remains low, so the NEMA should keep holding torque.
     motion_stop_immediate();
 }
 
@@ -642,9 +618,6 @@ void motion_save(float target_mm) {
     motion_set_jerk(SAVE_JERK);
 
     // Convert mm to steps relative to calibrated rail_min.
-    // This function is useful for future ball-position targeting.
-    // For hard left/right demo saves, use motion_save_left/right so the
-    // right side is always the measured rail_max, not an old RAIL_LENGTH_MM.
     int32_t target = mot.rail_min + (int32_t)(target_mm * STEPS_PER_MM);
     motion_move_to(target);
 }
@@ -724,7 +697,7 @@ static float braking_distance(float speed, float decel) {
     return (speed * speed) / (2.0f * decel);
 }
 
-// Main Update — call in tight loop or timer ISR
+// Main Update call in tight loop or timer ISR
 void motion_update(void) {
     static uint64_t last_update_time = 0;
 
@@ -860,7 +833,7 @@ void motion_update(void) {
         }
     }
 
-    // Optional physical endstop safety. Keep this OFF during normal demo/save moves.
+    // Optional physical endstop safety. Keep OFF during normal demo/save moves.
     if (endstop_safety_enabled && mot.moving && endstop_debounced(ENDSTOP_PIN, 8, 250)) {
         mot.position = mot.direction ? mot.rail_max : mot.rail_min;
         motion_stop_immediate();
@@ -1127,7 +1100,6 @@ bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_st
         return false;
     }
 
-    // Back off from MAX
     gpio_put(DIR_PIN, HOME_DIR);
     mot.direction = (HOME_DIR == 1);
     sleep_us(10);
@@ -1135,19 +1107,18 @@ bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_st
         gpio_put(STEP_PIN, 1); sleep_us(2); gpio_put(STEP_PIN, 0);
         sleep_us(step_interval - 2);
         mot.position--;
-        if (gpio_get(ENDSTOP_PIN)) break; // released
+        if (gpio_get(ENDSTOP_PIN)) break;
     }
-    for (int i = 0; i < 50; i++) { // clearance
+    for (int i = 0; i < 50; i++) { 
         gpio_put(STEP_PIN, 1); sleep_us(2); gpio_put(STEP_PIN, 0);
         sleep_us(step_interval - 2);
         mot.position--;
     }
     sleep_ms(50);
 
-    // rail_max is the usable maximum
+   
     mot.rail_max = mot.position;
 
-    // rail_length_steps hint is ignored: always use measured values
     (void)rail_length_steps;
 
     mot.target_speed    = saved_speed;
@@ -1158,7 +1129,6 @@ bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_st
     return true;
 }
 
-// Status Queries
 int32_t motion_get_position(void) {
     return mot.position;
 }

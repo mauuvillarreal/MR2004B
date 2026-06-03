@@ -18,8 +18,7 @@ bool MPU6050::init(AccelRange accel_range,
                    GyroRange gyro_range,
                    uint8_t dlpf_cfg,
                    uint8_t sample_divider) {
-    // Wake up and use the X gyro PLL as clock source. This is more stable than
-    // the internal oscillator once the device is running.
+    // Wake up and use the X gyro PLL as clock source.
     if (!writeReg(MPU6050_PWR_MGMT_1, 0x01)) {
         return false;
     }
@@ -48,8 +47,7 @@ bool MPU6050::configure(AccelRange accel_range,
         dlpf_cfg = 3;
     }
 
-    // DLPF=3 gives a useful vibration-filtered signal for a moving carriage.
-    // sample_divider=4 gives 200 Hz sample rate when DLPF is enabled.
+    // DLPF=3 gives a useful vibration-filtered signal
     if (!writeReg(MPU6050_CONFIG, dlpf_cfg)) return false;
     if (!writeReg(MPU6050_SMPLRT_DIV, sample_divider)) return false;
 

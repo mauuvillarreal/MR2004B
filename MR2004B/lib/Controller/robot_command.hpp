@@ -9,10 +9,6 @@ struct RobotCommand {
     bool controller_connected = false;
     bool failsafe_active = true;
 
-    // Combined lateral command:
-    // - triggers are primary: RT - LT
-    // - left joystick X is precision control only when triggers are idle
-    // -1.0 = logical left, +1.0 = logical right
     float lateral = 0.0f;
     bool precision_active = false;
 

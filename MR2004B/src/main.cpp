@@ -26,30 +26,30 @@
 #define MPU_I2C_BAUD    400000
 
 // Speeds in controller mode
-static constexpr float CONTROLLER_START_MAX_SPEED   = 12000.0f;
+static constexpr float CONTROLLER_START_MAX_SPEED   = MANUAL_MAX_SPEED;
 static constexpr float CONTROLLER_MIN_MAX_SPEED     = 1000.0f;
 static constexpr float CONTROLLER_MAX_MAX_SPEED     = SAVE_SPEED;
 static constexpr float CONTROLLER_SPEED_STEP        = 500.0f;
-static constexpr float CONTROLLER_LATERAL_DEADZONE  = 0.015f;
+static constexpr float CONTROLLER_LATERAL_DEADZONE  = 0.010f;
 static constexpr uint32_t CONTROLLER_FAILSAFE_MS    = 5000;
 
 // Controller behavior.
 static constexpr int32_t DPAD_JOG_STEPS             = 80; // ~9 mm
-static constexpr float MANUAL_TAKEOVER_THRESHOLD    = 0.08f;
+static constexpr float MANUAL_TAKEOVER_THRESHOLD    = 0.05f;
 static constexpr bool DISARM_DISABLES_DRIVER        = false;
+
+// Manual-control command filtering.
+static constexpr float MANUAL_MAIN_MIN_DELTA_STEPS  = 45.0f;
+static constexpr float MANUAL_FINE_MIN_DELTA_STEPS  = 12.0f;
+static constexpr float MANUAL_MIN_ACTIVE_SPEED      = 450.0f;
 
 // Stall / step-loss recovery.
 static volatile bool stall_flag = false;
 
 static float g_controller_max_speed = CONTROLLER_START_MAX_SPEED;
-
-// Manual command caching: the motor profile should not be re-commanded every
-// 1 ms with tiny Xbox analog variations.  Demo mode is clean because it sends
-// one move command; manual should behave the same way whenever possible.
 static float g_manual_last_velocity_cmd = 0.0f;
 static bool  g_manual_velocity_cmd_valid = false;
 static bool  g_manual_stop_already_sent = false;
-static bool  g_manual_fast_mode_active = false;
 static int   g_manual_direction = 0;   // -1 = left, +1 = right, 0 = stopped
 static bool  g_manual_motion_active = false;
 static bool  g_fault_latched = false;
@@ -151,7 +151,6 @@ static volatile AutoMode g_auto_mode = AutoMode::NONE;
 
 static void on_stall(void) {
     // Called from motion_update() when StallGuard detects a stall.
-    // Motor is already stopped by the time this fires.
     stall_flag = true;
     set_led_status(LedStatus::FAULT);
     // buzzer_beep(80);
@@ -185,8 +184,6 @@ static bool wait_move(void) {
     while (motion_is_moving()) {
         motion_update();
 
-        // If a stall fires mid-move, bail out of the wait loop.
-        // The caller must not kick after an aborted move.
         if (stall_flag) return false;
     }
     return !stall_flag;
@@ -330,95 +327,76 @@ static int32_t clamp_position_to_rail(int32_t pos) {
     return pos;
 }
 
+static void reset_manual_command_cache(void) {
+    g_manual_last_velocity_cmd = 0.0f;
+    g_manual_velocity_cmd_valid = false;
+    g_manual_stop_already_sent = false;
+    g_manual_direction = 0;
+    g_manual_motion_active = false;
+}
+
 static void stop_manual_motion(void) {
-    // Normal operator release should ramp down, not instantly kill step pulses.
-    // Send the zero-speed command only once. Re-sending it every 1 ms can delay
-    // the timer interrupt and create exactly the kind of manual-only rattle we
-    // are trying to remove.
-    if (!g_manual_stop_already_sent &&
-        (g_manual_motion_active || motion_is_manual_velocity_mode() || motion_is_moving())) {
+
+    if (!g_manual_stop_already_sent) {
         motion_manual_velocity(0.0f);
         g_manual_stop_already_sent = true;
     }
 
+    g_manual_last_velocity_cmd = 0.0f;
+    g_manual_velocity_cmd_valid = false;
     g_manual_direction = 0;
     g_manual_motion_active = false;
-    g_manual_velocity_cmd_valid = false;
-    g_manual_fast_mode_active = false;
 }
 
-static void emergency_stop_manual_motion(void) {
-    if (g_manual_motion_active || motion_is_moving()) {
-        motion_stop_immediate();
-    }
-
-    g_manual_direction = 0;
-    g_manual_motion_active = false;
-    g_manual_velocity_cmd_valid = false;
-    g_manual_stop_already_sent = false;
-    g_manual_fast_mode_active = false;
+static void hard_stop_manual_motion(void) {
+    // Use this only for faults/failsafe/emergency behavior.
+    motion_stop_immediate();
+    reset_manual_command_cache();
 }
 
-static void apply_manual_lateral(float lateral, bool precision_active) {
+static void apply_manual_lateral(float lateral, bool precision_mode) {
     // lateral: -1.0 = full left, +1.0 = full right.
-    //
-    // Important design change:
-    // - Fast trigger mode is event-like. Once RT/LT is past the deadzone, command
-    //   the selected velocity once and let the stepper profile run.
-    // - Precision stick mode is still analog, but tiny command changes are ignored
-    //   so Xbox ADC noise does not constantly retarget the motor.
-    const float abs_lat = fabsf(lateral);
-
-    if (abs_lat < CONTROLLER_LATERAL_DEADZONE) {
+    if (fabsf(lateral) < CONTROLLER_LATERAL_DEADZONE) {
         stop_manual_motion();
         return;
     }
 
-    float requested_speed;
-    if (precision_active) {
-        float mag = (abs_lat - CONTROLLER_LATERAL_DEADZONE) / (1.0f - CONTROLLER_LATERAL_DEADZONE);
-        mag = clampf_local(mag, 0.0f, 1.0f);
-        requested_speed = mag * g_controller_max_speed;
-        requested_speed = clampf_local(requested_speed, 250.0f, g_controller_max_speed);
-    } else {
-        requested_speed = g_controller_max_speed;
+    float abs_lateral = fabsf(lateral);
+    float max_speed = g_controller_max_speed;
+
+    if (precision_mode) {
+        max_speed *= robo::RobotCommandMapper::getPrecisionScale();
     }
+
+    if (max_speed < MANUAL_MIN_ACTIVE_SPEED) {
+        max_speed = MANUAL_MIN_ACTIVE_SPEED;
+    }
+
+    float requested_speed = abs_lateral * max_speed;
+    requested_speed = clampf_local(requested_speed, MANUAL_MIN_ACTIVE_SPEED, max_speed);
 
     float signed_velocity = (lateral > 0.0f) ? requested_speed : -requested_speed;
-    int new_dir = (signed_velocity > 0.0f) ? +1 : -1;
+    float min_delta = precision_mode ? MANUAL_FINE_MIN_DELTA_STEPS : MANUAL_MAIN_MIN_DELTA_STEPS;
 
-    // Trigger mode: do not re-command the same full-speed request every loop.
-    // This keeps responsiveness high but removes the repeated critical sections
-    // that were only present in manual mode.
-    bool should_send = false;
-    if (!g_manual_velocity_cmd_valid) {
-        should_send = true;
-    } else if (new_dir != g_manual_direction) {
-        should_send = true;
-    } else if (precision_active) {
-        // Fine stick mode needs updates, but only meaningful ones. 25 steps/s is
-        // small enough to feel responsive, but large enough to reject joystick noise.
-        if (fabsf(signed_velocity - g_manual_last_velocity_cmd) >= 25.0f) {
-            should_send = true;
-        }
-    } else if (!g_manual_fast_mode_active) {
-        should_send = true;
-    } else if (fabsf(signed_velocity - g_manual_last_velocity_cmd) >= 1.0f) {
-        should_send = true;
+    // Event-based manual command
+    bool direction_changed = (g_manual_direction != 0) &&
+                             ((signed_velocity > 0.0f ? +1 : -1) != g_manual_direction);
+    bool velocity_changed = !g_manual_velocity_cmd_valid ||
+                            (fabsf(signed_velocity - g_manual_last_velocity_cmd) >= min_delta);
+
+    if (!direction_changed && !velocity_changed && g_manual_motion_active) {
+        return;
     }
 
-    if (should_send) {
-        motion_set_acceleration(MANUAL_ACCEL, MANUAL_DECEL);
-        motion_set_max_speed(g_controller_max_speed);
-        motion_manual_velocity(signed_velocity);
-        g_manual_last_velocity_cmd = signed_velocity;
-        g_manual_velocity_cmd_valid = true;
-        g_manual_stop_already_sent = false;
-    }
+    motion_set_acceleration(MANUAL_ACCEL, MANUAL_DECEL);
+    motion_set_max_speed(g_controller_max_speed);
+    motion_manual_velocity(signed_velocity);
 
-    g_manual_direction = new_dir;
+    g_manual_last_velocity_cmd = signed_velocity;
+    g_manual_velocity_cmd_valid = true;
+    g_manual_stop_already_sent = false;
+    g_manual_direction = (signed_velocity > 0.0f) ? +1 : -1;
     g_manual_motion_active = true;
-    g_manual_fast_mode_active = !precision_active;
 }
 
 static void apply_speed_step(bool increase) {
@@ -506,8 +484,7 @@ static void run_rehome_sequence(void) {
     stop_manual_motion();
     solenoid_force_off();
 
-    // Re-enable the endstop for homing. It is disabled after normal calibration
-    // to avoid false triggers during saves/teleop.
+    // Re-enable the endstop for homing
     motion_endstop_safety_enable(true);
 
     bool ok = do_home();
@@ -527,7 +504,7 @@ static void run_rehome_sequence(void) {
     motion_return_center();
     g_auto_mode = AutoMode::CENTERING;
 
-    // After a deliberate rehome, keep the robot armed so the operator can resume quickly.
+    // After a deliberate rehome, keep the robot armed.
     g_robot_armed = true;
     motion_enable(true);
     set_led_status(LedStatus::AUTO_MOVING);
@@ -563,14 +540,13 @@ static void robot_control_core1(void) {
     printf("Robot control loop running on core 1.\n");
 
     while (true) {
-        // Keep the motion ramp and non-blocking solenoid alive.
         motion_update();
         solenoid_update();
 
         if (stall_flag) {
             if (!g_fault_latched) {
                 g_fault_latched = true;
-                stop_manual_motion();
+                hard_stop_manual_motion();
                 solenoid_force_off();
                 g_auto_mode = AutoMode::NONE;
                 set_led_status(LedStatus::FAULT);
@@ -594,7 +570,7 @@ static void robot_control_core1(void) {
             previous_failsafe = failsafe;
             if (failsafe) {
                 printf("Controller failsafe active: stopping motion.\n");
-                emergency_stop_manual_motion();
+                stop_manual_motion();
                 solenoid_force_off();
                 g_auto_mode = AutoMode::NONE;
             } else {
@@ -605,7 +581,6 @@ static void robot_control_core1(void) {
         if (cmd.emergency_stop) {
             printf("Emergency stop / disarm.\n");
             g_auto_mode = AutoMode::NONE;
-            emergency_stop_manual_motion();
             set_robot_armed(false);
             update_runtime_led(pad.connected, failsafe, cmd);
             imu_print_reading(false);
@@ -627,8 +602,6 @@ static void robot_control_core1(void) {
             set_robot_armed(true);
         }
 
-        // Rehome is deliberately allowed when connected even if disarmed, because it is
-        // a recovery/calibration action. The hold-to-confirm lives in RobotCommandMapper.
         if (cmd.rehome_request && pad.connected && !failsafe) {
             run_rehome_sequence();
         }
@@ -650,7 +623,6 @@ static void robot_control_core1(void) {
                     g_auto_mode = AutoMode::NONE;
                 }
 
-                // Important: do not send manual velocity while auto-center/jog is active.
                 update_runtime_led(pad.connected, failsafe, cmd);
                 imu_print_reading(false);
                 sleep_ms(1);
@@ -658,7 +630,6 @@ static void robot_control_core1(void) {
             }
         }
 
-        // Operator commands below this point require the robot to be armed.
         if (!g_robot_armed) {
             stop_manual_motion();
             update_runtime_led(pad.connected, failsafe, cmd);
@@ -694,15 +665,14 @@ static void robot_control_core1(void) {
         }
 
         if (g_auto_mode == AutoMode::NONE) {
-            // Your physical direction is inverted relative to the logical Xbox command.
+            // Physical direction is inverted relative to the logical Xbox command.
             apply_manual_lateral(-cmd.lateral, cmd.precision_active);
         }
 
         update_runtime_led(pad.connected, failsafe, cmd);
         imu_print_reading(false);
 
-        // 1 kHz-ish service loop. The actual STEP pulse generation is still done by
-        // the hardware alarm ISR started with motion_timer_start().
+        // 1 kHz service loop.
         sleep_ms(1);
     }
 }
@@ -733,8 +703,7 @@ int main() {
     motion_enable(true);
 
     // StallGuard is intentionally disabled
-    // Re-enable only after tuning, preferably in SpreadCycle.
-    // motion_set_stall_callback(on_stall);
+    // Re-enable preferably in SpreadCycle.
 
     // Initial homing.
     if (!do_home()) {
@@ -807,15 +776,15 @@ int main() {
     set_led_status(LedStatus::DRIVER_READY);
     // buzzer_beep(60);
     printf("\nDemo complete. Starting Bluetooth / Xbox controller mode.\n");
-    printf("Mapping: RT/LT=fast movement, left stick X=precision, LB=kick, D-pad up/down=speed, D-pad left/right=jog, A=arm, B=disarm, Start=center, hold Back=rehome.\n\n");
+    printf("Mapping: left stick X=FAST movement, RT/LT=slow precision movement, LB=kick, D-pad up/down=speed, D-pad left/right=jog, A=arm, B=disarm, Start=center, hold Back=rehome.\n\n");
 
     // Controller layer setup.
     xbox::XboxController::init();
-    xbox::XboxController::setDeadzone(0.10f);
+    xbox::XboxController::setDeadzone(0.06f);
     robo::RobotCommandMapper::init();
     robo::RobotCommandMapper::setTriggerDeadzone(0.03f);
-    robo::RobotCommandMapper::setLeftStickDeadzone(0.12f);
-    robo::RobotCommandMapper::setPrecisionScale(0.28f);
+    robo::RobotCommandMapper::setLeftStickDeadzone(0.08f);
+    robo::RobotCommandMapper::setPrecisionScale(0.25f);
     robo::RobotCommandMapper::setRehomeHoldMs(2000);
 
     if (cyw43_arch_init()) {

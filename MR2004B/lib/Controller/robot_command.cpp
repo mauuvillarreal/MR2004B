@@ -19,8 +19,8 @@ bool RobotCommandMapper::back_hold_fired = false;
 uint32_t RobotCommandMapper::back_hold_start_ms = 0;
 
 float RobotCommandMapper::trigger_deadzone = 0.03f;
-float RobotCommandMapper::left_stick_deadzone = 0.12f;
-float RobotCommandMapper::precision_scale = 0.28f;
+float RobotCommandMapper::left_stick_deadzone = 0.08f;
+float RobotCommandMapper::precision_scale = 0.25f;
 uint32_t RobotCommandMapper::rehome_hold_ms = 2000;
 
 void RobotCommandMapper::init() {
@@ -107,7 +107,10 @@ RobotCommand RobotCommandMapper::update(const xbox::State& state, bool failsafe_
         return cmd;
     }
 
-    // Triggers are primary fast movement: RT - LT.
+    // Left joystick X is now the primary fast movement control.
+    float stick_lateral = applyDeadzone(state.lx, left_stick_deadzone);
+
+    // RT/LT are slow precision movement: RT - LT.
     float rt = state.rt;
     float lt = state.lt;
 
@@ -116,14 +119,11 @@ RobotCommand RobotCommandMapper::update(const xbox::State& state, bool failsafe_
 
     float trigger_lateral = rt - lt;
 
-    // Left joystick X is precision movement only when triggers are idle.
-    float stick_lateral = applyDeadzone(state.lx, left_stick_deadzone);
-
-    if (fabsf(trigger_lateral) > trigger_deadzone) {
-        cmd.lateral = trigger_lateral;
+    if (stick_lateral != 0.0f) {
+        cmd.lateral = stick_lateral;
         cmd.precision_active = false;
-    } else if (stick_lateral != 0.0f) {
-        cmd.lateral = stick_lateral * precision_scale;
+    } else if (fabsf(trigger_lateral) > trigger_deadzone) {
+        cmd.lateral = trigger_lateral;
         cmd.precision_active = true;
     } else {
         cmd.lateral = 0.0f;
@@ -144,7 +144,7 @@ RobotCommand RobotCommandMapper::update(const xbox::State& state, bool failsafe_
     bool a_now = (state.buttons & xbox::BTN_A) != 0;
     bool b_now = (state.buttons & xbox::BTN_B) != 0;
 
-    // LB is the chosen kick button. RB is also accepted as a backup for older mappings.
+    // LB is kick button. 
     bool lb_fire = risingEdge(lb_now, prev_lb);
     bool rb_fire = risingEdge(rb_now, prev_rb);
     cmd.fire_solenoid = lb_fire || rb_fire;
@@ -156,7 +156,7 @@ RobotCommand RobotCommandMapper::update(const xbox::State& state, bool failsafe_
     cmd.return_center = risingEdge(start_now, prev_start);
     cmd.arm_request = risingEdge(a_now, prev_a);
 
-    // B is immediate stop/disarm while held.
+    // B is immediate stop/disarm.
     cmd.emergency_stop = b_now;
 
     // View / Back requires a hold to request re-home.

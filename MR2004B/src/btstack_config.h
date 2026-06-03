@@ -2,7 +2,6 @@
 #define _PICO_BTSTACK_BTSTACK_CONFIG_H
 
 // Bluepad32 / Pico W / Pico 2 W BTstack configuration.
-// Based on Bluepad32 examples/pico_w/src/btstack_config.h
 #define ENABLE_LOG_INFO
 #define ENABLE_LOG_ERROR
 #define ENABLE_PRINTF_HEXDUMP

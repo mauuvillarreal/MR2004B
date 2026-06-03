@@ -10,24 +10,21 @@
 extern "C" {
 #endif
 
-// ─── Pin Configuration ────────────────────────────────────────────────────────
-// MR2004B custom Pico 2 W PCB pinout
+// Pin Configuration (On UM-1)
 #define STEP_PIN        11   // TMC2209 STEP
 #define DIR_PIN         10   // TMC2209 DIR
 #define EN_PIN          28   // TMC2209 EN, active LOW
-#define ENDSTOP_PIN     17   // Shared limit-switch input, active LOW with internal pull-up
+#define ENDSTOP_PIN     17   // Shared limit-switch input
 
 #define RGB_R_PIN       21
 #define RGB_G_PIN       20
 #define RGB_B_PIN       19
 #define BUZZER_PIN      18
 
-// Change these to 0 if your PCB uses active-LOW/common-anode LED or active-LOW buzzer drive.
 #define RGB_ACTIVE_HIGH     1
 #define BUZZER_ACTIVE_HIGH  1
 
 // MPU6050 I2C pins on the custom PCB.
-// The motor-only test code does not require the MPU to be connected.
 #define MPU_I2C_PORT    i2c1
 #define MPU_SDA_PIN     2
 #define MPU_SCL_PIN     3
@@ -42,45 +39,45 @@ extern "C" {
 #define UART_RX_PIN     9
 
 #define MOTOR_STEPS_PER_REV  200
-#define MICROSTEPS           16
+#define MICROSTEPS           8
 
 #define PULLEY_TEETH         80
 #define BELT_PITCH_MM        2.0f
 #define MM_PER_REV           (PULLEY_TEETH * BELT_PITCH_MM)
 
 #define RAIL_LENGTH_MM       344.35f
-#define STEPS_PER_MM         ((float)(MOTOR_STEPS_PER_REV * MICROSTEPS) / MM_PER_REV)
+#define STEPS_PER_MM         8.78f
 
 #define RAIL_STEPS           ((int32_t)(RAIL_LENGTH_MM * STEPS_PER_MM))
 #define RAIL_CENTER_STEPS    (RAIL_STEPS / 2)
 
-#define IHOLD       8    // Quieter/stronger hold for testing; reduce later if motor gets hot
-#define IRUN        20   // Conservative run current for UART-verified setup; raise later only if needed
-#define IHOLDDELAY  4    // ~0.5s before dropping to IHOLD after move ends
+#define IHOLD       8  
+#define IRUN        24
+#define IHOLDDELAY  4   
 
 
 
-#define SAVE_SPEED          12000.0f   // Aggressive save speed; tune upward only after testing
-#define SAVE_ACCEL          40000.0f   // Save acceleration in steps/sec^2
-#define SAVE_DECEL          45000.0f   // Save deceleration in steps/sec^2
-#define SAVE_JERK          180000.0f   // Save jerk in steps/sec^3; 0 disables S-curve
+#define SAVE_SPEED          7000.0f  
+#define SAVE_ACCEL          55000.0f   // Save acceleration in steps/sec^2
+#define SAVE_DECEL          65000.0f   // Save deceleration in steps/sec^2
+#define SAVE_JERK          180000.0f   // Save jerk in steps/sec^3;
 
 #define RETURN_SPEED         9000.0f
 #define RETURN_ACCEL        30000.0f
 #define RETURN_DECEL        35000.0f
 #define RETURN_JERK        140000.0f
 
-#define MANUAL_MAX_SPEED    12000.0f
-#define MANUAL_ACCEL        70000.0f
-#define MANUAL_DECEL        90000.0f
+#define MANUAL_MAX_SPEED    14000.0f
+#define MANUAL_ACCEL       110000.0f
+#define MANUAL_DECEL       130000.0f
 #define MANUAL_JERK         0.0f
 
 #define HOMING_SPEED          400.0f
 
-// ─── TMC2209 Register Map ────────────────────────────────────────────────────
+// TMC2209 Register Map
 #define TMC_REG_GCONF       0x00
 #define TMC_REG_GSTAT       0x01
-#define TMC_REG_IFCNT       0x02   // UART successful-write counter
+#define TMC_REG_IFCNT       0x02 // UART successful-write counter
 #define TMC_REG_IOIN        0x06
 #define TMC_REG_IHOLD_IRUN  0x10
 #define TMC_REG_TPOWERDOWN  0x11
@@ -88,7 +85,7 @@ extern "C" {
 #define TMC_REG_TPWMTHRS    0x13
 #define TMC_REG_TCOOLTHRS   0x14
 #define TMC_REG_VACTUAL     0x22
-#define TMC_REG_SGTHRS      0x40   // StallGuard threshold
+#define TMC_REG_SGTHRS      0x40 // StallGuard threshold
 #define TMC_REG_SG_RESULT   0x41
 #define TMC_REG_COOLCONF    0x42
 #define TMC_REG_CHOPCONF    0x6C
@@ -98,21 +95,20 @@ extern "C" {
 #define TMC_REG_DRV_STATUS  0x6F
 
 
-// ─── Motion Parameters ───────────────────────────────────────────────────────
+// Motion Parameters
 typedef struct {
-    // Speed (steps/sec)
-    float max_speed;
+    
+    float max_speed;             
     float current_speed;
     float target_speed;
-    float manual_velocity_command;  // signed steps/sec; + = toward rail_max, - = toward rail_min
-    bool  manual_velocity_mode;     // true while manual velocity control is active
+    float manual_velocity_command;
+    bool  manual_velocity_mode;  
 
     // Acceleration / S-curve
     float acceleration;       // steps/sec²
     float deceleration;       // steps/sec²
-    float jerk;               // steps/sec³ — rate of accel change (S-curve smoothing)
-                              // set to 0 to disable S-curve (pure trapezoidal)
-    float current_accel;      // live acceleration value (varies during S-curve)
+    float jerk;               // steps/sec³ 
+    float current_accel;      // live acceleration value
 
     // Position (steps, absolute)
     int32_t position;
@@ -143,14 +139,9 @@ typedef struct {
     uint8_t stallguard_threshold;
     bool    stall_detected;
 
-    // Step loss tracking
-    // motion_update() compares expected vs actual SG_RESULT trend.
-    // If stall_callback is set, it fires when a stall is detected while moving.
-    void (*stall_callback)(void);  // set via motion_set_stall_callback()
-    uint32_t stall_debounce;       // consecutive stall reads before firing callback
+    void (*stall_callback)(void);  
+    uint32_t stall_debounce;      
 } MotionState;
-
-// ─── Public API ──────────────────────────────────────────────────────────────
 
 // Initialisation
 void tmc_init(void);
@@ -163,7 +154,7 @@ void buzzer_beep(uint32_t duration_ms);
 bool limit_switch_pressed(void);
 void tmc_configure(uint8_t ihold, uint8_t irun, uint8_t iholddelay,
                    uint8_t microsteps, bool stealthchop);
-void motion_timer_start(void);  // start hardware-timer step generation (call after homing)
+void motion_timer_start(void);  // start hardware-timer step generation
 
 // Motion control
 void motion_set_speed(float steps_per_sec);
@@ -176,10 +167,6 @@ void motion_move_to(int32_t target_steps);
 void motion_move_to_mm(float mm);           // convenience: move to mm position
 void motion_move_relative(int32_t delta_steps);
 
-// Manual velocity mode is intended for joystick / Xbox control.
-// velocity_steps_per_sec > 0 moves toward rail_max.
-// velocity_steps_per_sec < 0 moves toward rail_min.
-// velocity_steps_per_sec == 0 decelerates/stops and exits manual mode.
 void motion_manual_velocity(float velocity_steps_per_sec);
 void motion_manual_stop(void);
 bool motion_is_manual_velocity_mode(void);
@@ -187,14 +174,13 @@ bool motion_is_manual_velocity_mode(void);
 void motion_stop(void);
 void motion_stop_immediate(void);
 void motion_enable(bool en);
-void motion_endstop_safety_enable(bool en); // normally false after homing; enable only for slow/manual safety moves
+void motion_endstop_safety_enable(bool en); // normally false after homing;
 
 // Goalkeeper helpers
-void motion_save(float target_mm);          // max-speed move to mm position inside calibrated rail
-void motion_save_left(void);             // max-speed move directly to calibrated rail_min
-void motion_save_right(void);            // max-speed move directly to calibrated rail_max
-void motion_return_center(void);            // smooth return to rail center
-
+void motion_save(float target_mm);
+void motion_save_left(void);    
+void motion_save_right(void);     
+void motion_return_center(void);   
 
 // Homing
 bool motion_home(bool use_stallguard, float homing_speed, int32_t rail_length_steps);
@@ -204,7 +190,7 @@ void motion_pid_configure(float kp, float ki, float kd);
 void motion_pid_enable(bool en);
 float motion_pid_compute(int32_t setpoint, int32_t measurement, float dt);
 
-// Update — call as fast as possible in main loop (or from timer ISR)
+// Update
 void motion_update(void);
 
 // Status
@@ -221,16 +207,16 @@ void     tmc_write(uint8_t reg, uint32_t value);
 uint32_t tmc_read(uint8_t reg);
 uint16_t tmc_get_stallguard(void);
 bool     tmc_check_stall(void);
-void     motion_set_stall_callback(void (*cb)(void)); // called on stall detect while moving
+void     motion_set_stall_callback(void (*cb)(void)); 
 
 // Current control
-void  tmc_set_current(float irun_amps, float ihold_amps);  // set current in amps (max 2.0A RMS)
-float tmc_get_current_scale(void);    // returns PWM_SCALE_SUM: 0–255, proportional to actual load
-void  tmc_print_status(void);         // prints current scale, stallguard, and computed amps to stdout
+void  tmc_set_current(float irun_amps, float ihold_amps); 
+float tmc_get_current_scale(void);  
+void  tmc_print_status(void);         
 
 // Utilities
 uint8_t  tmc_crc(uint8_t *data, uint8_t length);
-uint32_t tmc_microstep_bits(uint16_t microsteps); // convert 1/2/4/../256 to MRES bits
+uint32_t tmc_microstep_bits(uint16_t microsteps); 
 
 void tmc_uart_scan_ioin(void);
 void tmc_print_config_status(void);
