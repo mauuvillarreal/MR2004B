@@ -30,7 +30,7 @@
 #define ENABLE_I2C_DEVICE_DIAGNOSTICS
 
 #define TOF_I2C_ADDRESS 0x29
-static constexpr uint16_t AUTO_KICK_DISTANCE_MM = 180; // Tunear
+static constexpr uint16_t AUTO_KICK_DISTANCE_MM = 180;
 static constexpr uint16_t AUTO_KICK_RELEASE_MM  = AUTO_KICK_DISTANCE_MM + 40;
 static constexpr uint32_t AUTO_KICK_COOLDOWN_MS = 450;
 static constexpr uint32_t TOF_SERVICE_PERIOD_MS = 5;
