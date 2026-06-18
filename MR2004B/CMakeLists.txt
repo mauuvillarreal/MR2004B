@@ -62,6 +62,14 @@ endif()
 add_subdirectory(lib/TMC2209)
 add_subdirectory(lib/MPU)
 
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/lib/VL53L0X/CMakeLists.txt)
+    add_subdirectory(lib/VL53L0X)
+endif()
+
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/lib/ExternalLED/CMakeLists.txt)
+    add_subdirectory(lib/ExternalLED)
+endif()
+
 if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/lib/Solenoid/CMakeLists.txt)
     add_subdirectory(lib/Solenoid)
 endif()
@@ -86,6 +94,14 @@ target_include_directories(MR2004B PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/lib/TMC2209
     ${CMAKE_CURRENT_LIST_DIR}/lib/MPU
 )
+
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/lib/VL53L0X)
+    target_include_directories(MR2004B PRIVATE ${CMAKE_CURRENT_LIST_DIR}/lib/VL53L0X)
+endif()
+
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/lib/ExternalLED)
+    target_include_directories(MR2004B PRIVATE ${CMAKE_CURRENT_LIST_DIR}/lib/ExternalLED)
+endif()
 
 if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/lib/Solenoid)
     target_include_directories(MR2004B PRIVATE ${CMAKE_CURRENT_LIST_DIR}/lib/Solenoid)
@@ -113,6 +129,18 @@ target_link_libraries(MR2004B
     TMC2209
     MPU
 )
+
+if(TARGET vl53l0x)
+    target_link_libraries(MR2004B vl53l0x)
+elseif(TARGET VL53L0X)
+    target_link_libraries(MR2004B VL53L0X)
+endif()
+
+if(TARGET external_led)
+    target_link_libraries(MR2004B external_led)
+elseif(TARGET ExternalLED)
+    target_link_libraries(MR2004B ExternalLED)
+endif()
 
 if(TARGET Solenoid)
     target_link_libraries(MR2004B Solenoid)

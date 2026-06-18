@@ -13,6 +13,7 @@ bool RobotCommandMapper::prev_dpad_left = false;
 bool RobotCommandMapper::prev_dpad_right = false;
 bool RobotCommandMapper::prev_start = false;
 bool RobotCommandMapper::prev_a = false;
+bool RobotCommandMapper::prev_y = false;
 
 bool RobotCommandMapper::back_was_held = false;
 bool RobotCommandMapper::back_hold_fired = false;
@@ -32,6 +33,7 @@ void RobotCommandMapper::init() {
     prev_dpad_right = false;
     prev_start = false;
     prev_a = false;
+    prev_y = false;
 
     back_was_held = false;
     back_hold_fired = false;
@@ -102,12 +104,12 @@ RobotCommand RobotCommandMapper::update(const xbox::State& state, bool failsafe_
         cmd.lateral = 0.0f;
         cmd.emergency_stop = true;
 
-        // Reset edge/hold state while disconnected so reconnecting starts cleanly.
+        // Reset edge/hold state while disconnected so reconnecting starts.
         init();
         return cmd;
     }
 
-    // Left joystick X is now the primary fast movement control.
+    // Left joystick X is the primary fast movement control.
     float stick_lateral = applyDeadzone(state.lx, left_stick_deadzone);
 
     // RT/LT are slow precision movement: RT - LT.
@@ -143,6 +145,7 @@ RobotCommand RobotCommandMapper::update(const xbox::State& state, bool failsafe_
     bool back_now = (state.buttons & xbox::BTN_BACK) != 0;
     bool a_now = (state.buttons & xbox::BTN_A) != 0;
     bool b_now = (state.buttons & xbox::BTN_B) != 0;
+    bool y_now = (state.buttons & xbox::BTN_Y) != 0;
 
     // LB is kick button. 
     bool lb_fire = risingEdge(lb_now, prev_lb);
@@ -155,6 +158,7 @@ RobotCommand RobotCommandMapper::update(const xbox::State& state, bool failsafe_
     cmd.jog_right = risingEdge(dpad_right_now, prev_dpad_right);
     cmd.return_center = risingEdge(start_now, prev_start);
     cmd.arm_request = risingEdge(a_now, prev_a);
+    cmd.toggle_auto_kick = risingEdge(y_now, prev_y);
 
     // B is immediate stop/disarm.
     cmd.emergency_stop = b_now;

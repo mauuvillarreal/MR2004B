@@ -21,6 +21,7 @@ struct RobotCommand {
     bool return_center = false;
     bool rehome_request = false;
     bool arm_request = false;
+    bool toggle_auto_kick = false;
 
     // Hold action. True while B is held.
     bool emergency_stop = false;
@@ -56,6 +57,7 @@ private:
     static bool prev_dpad_right;
     static bool prev_start;
     static bool prev_a;
+    static bool prev_y;
 
     static bool back_was_held;
     static bool back_hold_fired;
